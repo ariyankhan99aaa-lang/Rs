@@ -9,6 +9,7 @@ from datetime import datetime
 import queue
 import random
 from urllib.parse import quote
+import re
 
 # Bot Configuration
 BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # আপনার টেলিগ্রাম বট টোকেন দিন
@@ -23,6 +24,7 @@ Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
 user_threads = {}
 checking_queue = queue.Queue()
 is_checking = {}
+live_stats = {}  # প্রতি ইউজারের লাইভ স্ট্যাট স্টোর করবে
 
 # User Agent List
 USER_AGENTS = [
@@ -85,7 +87,7 @@ def save_numbers_to_db(user_id, phone_numbers):
     count = 0
     for number in phone_numbers:
         number = number.strip()
-        if number:  # সব ধরনের নম্বর accept করব
+        if number:
             cursor.execute('''
                 INSERT INTO numbers (user_id, phone_number, status)
                 VALUES (?, ?, 'unchecked')
@@ -143,6 +145,33 @@ def get_checked_numbers(user_id, has_id=None):
     conn.close()
     return results
 
+def get_stats(user_id):
+    """বর্তমান স্ট্যাট পান"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked" AND has_id = 1', (user_id,))
+    with_id = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked" AND has_id = 0', (user_id,))
+    without_id = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked"', (user_id,))
+    total_checked = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ?', (user_id,))
+    total = cursor.fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        'with_id': with_id,
+        'without_id': without_id,
+        'total_checked': total_checked,
+        'total': total,
+        'remaining': total - total_checked
+    }
+
 def get_user_thread_count(user_id):
     """ইউজারের থ্রেড কাউন্ট পান"""
     conn = sqlite3.connect(DB_PATH)
@@ -153,7 +182,7 @@ def get_user_thread_count(user_id):
     
     if result:
         return result[0]
-    return 20  # Default
+    return 20
 
 def set_user_thread_count(user_id, thread_count):
     """ইউজারের থ্রেড কাউন্ট সেট করুন"""
@@ -175,13 +204,12 @@ def get_random_user_agent():
 # ==================== FACEBOOK CHECK FUNCTION ====================
 
 def check_facebook_number(phone_number):
-    """Advanced Facebook নম্বর চেক - প্রতিবার নতুন User-Agent দিয়ে"""
+    """Advanced Facebook নম্বর চেক - fb.com এর limited server থেকে"""
     try:
-        # প্রতিবার নতুন User-Agent generate করবে
         user_agent = get_random_user_agent()
         
-        # Facebook Forget API
-        url = "https://www.facebook.com/login/identify"
+        # fb.com (limited server)
+        url = "https://www.fb.com/login/identify"
         
         headers = {
             'User-Agent': user_agent,
@@ -191,8 +219,8 @@ def check_facebook_number(phone_number):
             'DNT': '1',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
-            'Referer': 'https://www.facebook.com/',
-            'Origin': 'https://www.facebook.com'
+            'Referer': 'https://www.fb.com/',
+            'Origin': 'https://www.fb.com'
         }
         
         params = {
@@ -201,9 +229,8 @@ def check_facebook_number(phone_number):
         }
         
         session = requests.Session()
-        response = session.get(url, params=params, headers=headers, timeout=15)
+        response = session.get(url, params=params, headers=headers, timeout=15, verify=False)
         
-        # Check if account exists - এর জন্য response analyze করব
         response_text = response.text.lower()
         
         # যদি নিচের কোনটা পাওয়া যায় তাহলে ID আছে
@@ -217,7 +244,10 @@ def check_facebook_number(phone_number):
             '"id"',
             'name":',
             'picture',
-            'phone_number_warning' # এটা মানে নম্বর টি Facebook account এ linked
+            'phone_number_warning',
+            'facebook_id',
+            'account_found',
+            'recovery_code'
         ]
         
         found_id = False
@@ -229,11 +259,47 @@ def check_facebook_number(phone_number):
         return found_id
         
     except requests.exceptions.Timeout:
-        print(f"Timeout: {phone_number}")
         return False
     except Exception as e:
-        print(f"Error checking {phone_number}: {str(e)}")
         return False
+
+# ==================== LIVE DASHBOARD ====================
+
+def create_live_dashboard(user_id, stats):
+    """লাইভ ড্যাশবোর্ড টেবিল তৈরি করবে"""
+    
+    with_id = stats['with_id']
+    without_id = stats['without_id']
+    total_checked = stats['total_checked']
+    total = stats['total']
+    remaining = stats['remaining']
+    
+    # Progress bar
+    if total > 0:
+        progress = (total_checked / total) * 100
+    else:
+        progress = 0
+    
+    # Progress bar visual
+    filled = int(progress / 5)  # 20 chars = 100%
+    empty = 20 - filled
+    progress_bar = "█" * filled + "░" * empty
+    
+    dashboard = (
+        f"╔════════════════════════════════════════╗\n"
+        f"║    📊 LIVE CHECKING DASHBOARD 📊     ║\n"
+        f"╠════════════════════════════════════════╣\n"
+        f"║ 🟢 ID FOUND (Fresh)    : {with_id:>8}     ║\n"
+        f"║ 🔴 NO ID (Unfresh)    : {without_id:>8}     ║\n"
+        f"║ ✓ Total Checked       : {total_checked:>8}     ║\n"
+        f"║ ⏳ Remaining          : {remaining:>8}     ║\n"
+        f"║ 📈 Total Numbers      : {total:>8}     ║\n"
+        f"╠════════════════════════════════════════╣\n"
+        f"║ 📊 Progress: {progress_bar} {progress:.1f}%  ║\n"
+        f"╚════════════════════════════════════════╝"
+    )
+    
+    return dashboard
 
 # ==================== TELEGRAM BOT COMMANDS ====================
 
@@ -252,9 +318,10 @@ def send_welcome(message):
     
     bot.send_message(
         user_id,
-        "🎉 *Facebook Checker Bot v2*\n\n"
+        "🎉 *Facebook Checker Bot v3*\n\n"
         "আমি আপনার Facebook নম্বরগুলি চেক করতে পারি।\n"
-        "প্রতিটি চেক এ নতুন User-Agent ব্যবহার করব।\n\n"
+        "প্রতিটি চেক এ নতুন User-Agent ব্যবহার করব।\n"
+        "লাইভ ড্যাশবোর্ড সহ রিয়েল টাইম আপডেট!\n\n"
         "নিচের বাটন গুলি ব্যবহার করুন:",
         reply_markup=markup,
         parse_mode='Markdown'
@@ -282,15 +349,12 @@ def process_file_upload(message):
             file_info = bot.get_file(message.document.file_id)
             file_path = file_info.file_path
             
-            # ফাইল ডাউনলোড করুন
             file_content = bot.download_file(file_path)
             
-            # ফাইল সংরক্ষণ করুন
             local_file = f"{UPLOAD_FOLDER}/{user_id}_{message.document.file_name}"
             with open(local_file, 'wb') as f:
                 f.write(file_content)
             
-            # নম্বর পড়ুন এবং সেভ করুন
             with open(local_file, 'r', encoding='utf-8') as f:
                 numbers = f.readlines()
             
@@ -350,7 +414,6 @@ def handle_check_numbers(message):
     """নম্বর চেক করা শুরু করবে"""
     user_id = message.chat.id
     
-    # অবশেষ unchecked নম্বর পান
     unchecked = get_unchecked_numbers(user_id)
     
     if not unchecked:
@@ -363,9 +426,17 @@ def handle_check_numbers(message):
     
     is_checking[user_id] = True
     thread_count = get_user_thread_count(user_id)
+    total = len(unchecked)
+    
+    live_stats[user_id] = {
+        'start_time': time.time(),
+        'total': total,
+        'checked': 0,
+        'fresh': 0,
+        'unfresh': 0
+    }
     
     # শুরুর বার্তা পাঠান
-    total = len(unchecked)
     bot.send_message(
         user_id,
         f"🚀 চেকিং শুরু হয়েছে!\n\n"
@@ -376,7 +447,14 @@ def handle_check_numbers(message):
         parse_mode='Markdown'
     )
     
-    # Multi-threading চেকিং শুরু করুন
+    # লাইভ ড্যাশবোর্ড মেসেজ
+    dashboard_msg = bot.send_message(
+        user_id,
+        "```\n" + create_live_dashboard(user_id, get_stats(user_id)) + "\n```",
+        parse_mode='Markdown'
+    )
+    dashboard_msg_id = dashboard_msg.message_id
+    
     checked_count = [0]
     lock = threading.Lock()
     
@@ -385,23 +463,14 @@ def handle_check_numbers(message):
             try:
                 number_id, phone_number = checking_queue.get(timeout=1)
                 
-                # প্রতিবার নতুন User-Agent দিয়ে চেক করবে
                 has_id = 1 if check_facebook_number(phone_number) else 0
                 update_number_status(number_id, has_id)
                 
                 with lock:
                     checked_count[0] += 1
                 
-                # প্রতিটি 25টি নম্বর চেক করার পর আপডেট পাঠান
-                if checked_count[0] % 25 == 0:
-                    bot.send_message(
-                        user_id,
-                        f"⏳ অগ্রগতি: {checked_count[0]}/{total} নম্বর চেক হয়েছে।",
-                        parse_mode='Markdown'
-                    )
-                
                 checking_queue.task_done()
-                time.sleep(0.2)  # Little delay between checks
+                time.sleep(0.2)
                 
             except queue.Empty:
                 break
@@ -417,23 +486,40 @@ def handle_check_numbers(message):
         t.start()
         threads.append(t)
     
-    # সব থ্রেড শেষ হওয়ার জন্য অপেক্ষা করুন
-    checking_queue.join()
+    # লাইভ আপডেট শুরু করুন (প্রতি 3 সেকেন্ডে)
+    update_interval = 0.1
+    last_update = time.time()
     
+    while checked_count[0] < total:
+        current_time = time.time()
+        
+        if current_time - last_update >= 3:
+            try:
+                stats = get_stats(user_id)
+                dashboard_text = create_live_dashboard(user_id, stats)
+                bot.edit_message_text(
+                    text="```\n" + dashboard_text + "\n```",
+                    chat_id=user_id,
+                    message_id=dashboard_msg_id,
+                    parse_mode='Markdown'
+                )
+                last_update = current_time
+            except Exception as e:
+                pass
+        
+        time.sleep(0.5)
+    
+    checking_queue.join()
     is_checking[user_id] = False
     
     # চূড়ান্ত রিপোর্ট পাঠান
-    fresh = len(get_checked_numbers(user_id, 1))
-    unfresh = len(get_checked_numbers(user_id, 0))
+    final_stats = get_stats(user_id)
+    final_dashboard = create_live_dashboard(user_id, final_stats)
     
     bot.send_message(
         user_id,
         f"✅ চেকিং সম্পন্ন!\n\n"
-        f"📊 ফলাফল:\n"
-        f"• 🟢 Fresh (ID আছে): *{fresh}*\n"
-        f"• 🔴 Unfresh (ID নেই): *{unfresh}*\n"
-        f"• 📈 মোট চেক করা: *{checked_count[0]}*\n\n"
-        f"🔀 প্রতিটি চেক এ নতুন User-Agent ব্যবহার করা হয়েছে।",
+        f"```\n{final_dashboard}\n```",
         parse_mode='Markdown'
     )
 
@@ -457,7 +543,7 @@ def handle_download(message):
 
 @bot.message_handler(func=lambda message: message.text == "🟢 Fresh Numbers")
 def download_fresh(message):
-    """Fresh নম্বর ডাউনলোড করবে (ID আছে)"""
+    """Fresh নম্বর ডাউনলোড করবে"""
     user_id = message.chat.id
     
     numbers = get_checked_numbers(user_id, 1)
@@ -466,28 +552,25 @@ def download_fresh(message):
         bot.send_message(user_id, "❌ কোনো Fresh নম্বর পাওয়া যায়নি।")
         return
     
-    # ফাইল তৈরি করুন
     filename = f"{UPLOAD_FOLDER}/fresh_{user_id}_{int(time.time())}.txt"
     with open(filename, 'w') as f:
         for number in numbers:
             f.write(number + '\n')
     
-    # ফাইল পাঠান
     with open(filename, 'rb') as f:
         bot.send_document(
             user_id,
             f,
-            caption=f"🟢 Fresh Numbers\n\n"
+            caption=f"🟢 Fresh Numbers (ID আছে)\n\n"
                    f"মোট: {len(numbers)} টি"
         )
     
-    # ফাইল মুছে ফেলুন
     Path(filename).unlink()
     send_welcome(message)
 
 @bot.message_handler(func=lambda message: message.text == "🔴 Unfresh Numbers")
 def download_unfresh(message):
-    """Unfresh নম্বর ডাউনলোড করবে (ID নেই)"""
+    """Unfresh নম্বর ডাউনলোড করবে"""
     user_id = message.chat.id
     
     numbers = get_checked_numbers(user_id, 0)
@@ -496,22 +579,19 @@ def download_unfresh(message):
         bot.send_message(user_id, "❌ কোনো Unfresh নম্বর পাওয়া যায়নি।")
         return
     
-    # ফাইল তৈরি করুন
     filename = f"{UPLOAD_FOLDER}/unfresh_{user_id}_{int(time.time())}.txt"
     with open(filename, 'w') as f:
         for number in numbers:
             f.write(number + '\n')
     
-    # ফাইল পাঠান
     with open(filename, 'rb') as f:
         bot.send_document(
             user_id,
             f,
-            caption=f"🔴 Unfresh Numbers\n\n"
+            caption=f"🔴 Unfresh Numbers (ID নেই)\n\n"
                    f"মোট: {len(numbers)} টি"
         )
     
-    # ফাইল মুছে ফেলুন
     Path(filename).unlink()
     send_welcome(message)
 
@@ -522,7 +602,7 @@ def go_back(message):
 
 # Bot চালু করুন
 if __name__ == "__main__":
-    print("🤖 Facebook Checker Bot v2 চলছে...")
-    print("✨ প্রতিটি থ্রেডে নতুন User-Agent ব্যবহার হবে।")
+    print("🤖 Facebook Checker Bot v3 চলছে...")
+    print("✨ লাইভ ড্যাশবোর্ড সহ!")
     print("⚠️ BOT_TOKEN সেট করুন আগে!")
     bot.infinity_polling()
