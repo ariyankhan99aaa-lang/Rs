@@ -31,7 +31,9 @@ Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
 user_threads = {}
 checking_queue = queue.Queue()
 is_checking = {}
+should_stop = {}
 live_stats = {}
+db_lock = threading.Lock()
 
 # User Agent List
 USER_AGENTS = [
@@ -59,28 +61,32 @@ USER_AGENTS = [
 
 # Database Initialization
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS numbers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            phone_number TEXT,
-            status TEXT DEFAULT 'unchecked',
-            has_id INTEGER DEFAULT 0,
-            uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            checked_at TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS user_settings (
-            user_id INTEGER PRIMARY KEY,
-            thread_count INTEGER DEFAULT 20,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS numbers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                phone_number TEXT,
+                status TEXT DEFAULT 'unchecked',
+                has_id INTEGER DEFAULT 0,
+                uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                checked_at TIMESTAMP
+            )
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                thread_count INTEGER DEFAULT 20,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        pass
 
 init_db()
 
@@ -88,160 +94,204 @@ init_db()
 
 def save_numbers_to_db(user_id, phone_numbers):
     """টেক্সট ফাইল থেকে নম্বর ডাটাবেসে সেভ করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    count = 0
-    for number in phone_numbers:
-        number = number.strip()
-        if number:
-            cursor.execute('''
-                INSERT INTO numbers (user_id, phone_number, status)
-                VALUES (?, ?, 'unchecked')
-            ''', (user_id, number))
-            count += 1
-    
-    conn.commit()
-    conn.close()
-    return count
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            
+            count = 0
+            for number in phone_numbers:
+                number = number.strip()
+                if number:
+                    cursor.execute('''
+                        INSERT INTO numbers (user_id, phone_number, status)
+                        VALUES (?, ?, 'unchecked')
+                    ''', (user_id, number))
+                    count += 1
+            
+            conn.commit()
+            conn.close()
+            return count
+    except Exception as e:
+        return 0
 
 def get_unchecked_numbers(user_id):
     """সমস্ত unchecked নম্বর fetch করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT id, phone_number FROM numbers 
-        WHERE user_id = ? AND status = 'unchecked'
-        ORDER BY id
-    ''', (user_id,))
-    results = cursor.fetchall()
-    conn.close()
-    return results
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, phone_number FROM numbers 
+                WHERE user_id = ? AND status = 'unchecked'
+                ORDER BY id
+            ''', (user_id,))
+            results = cursor.fetchall()
+            conn.close()
+            return results
+    except Exception as e:
+        return []
 
 def update_number_status(number_id, has_id):
     """নম্বরের স্ট্যাটাস আপডেট করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        UPDATE numbers 
-        SET status = 'checked', has_id = ?, checked_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-    ''', (has_id, number_id))
-    conn.commit()
-    conn.close()
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE numbers 
+                SET status = 'checked', has_id = ?, checked_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (has_id, number_id))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        pass
 
 def get_checked_numbers(user_id, has_id=None):
     """Checked নম্বর গুলো fetch করবে (Fresh/Unfresh)"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    if has_id is None:
-        cursor.execute('''
-            SELECT phone_number FROM numbers 
-            WHERE user_id = ? AND status = 'checked'
-            ORDER BY id
-        ''', (user_id,))
-    else:
-        cursor.execute('''
-            SELECT phone_number FROM numbers 
-            WHERE user_id = ? AND status = 'checked' AND has_id = ?
-            ORDER BY id
-        ''', (user_id, has_id))
-    
-    results = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return results
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            
+            if has_id is None:
+                cursor.execute('''
+                    SELECT phone_number FROM numbers 
+                    WHERE user_id = ? AND status = 'checked'
+                    ORDER BY id
+                ''', (user_id,))
+            else:
+                cursor.execute('''
+                    SELECT phone_number FROM numbers 
+                    WHERE user_id = ? AND status = 'checked' AND has_id = ?
+                    ORDER BY id
+                ''', (user_id, has_id))
+            
+            results = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            return results
+    except Exception as e:
+        return []
 
 def get_all_numbers(user_id):
     """সব নম্বর fetch করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT phone_number FROM numbers 
-        WHERE user_id = ?
-        ORDER BY id
-    ''', (user_id,))
-    results = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return results
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT phone_number FROM numbers 
+                WHERE user_id = ?
+                ORDER BY id
+            ''', (user_id,))
+            results = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            return results
+    except Exception as e:
+        return []
 
 def delete_all_numbers(user_id):
     """সব নম্বর ডিলিট করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM numbers WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM numbers WHERE user_id = ?', (user_id,))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        pass
 
 def delete_checked_numbers(user_id):
     """শুধু চেক করা নম্বর ডিলিট করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM numbers WHERE user_id = ? AND status = "checked"', (user_id,))
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return deleted
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM numbers WHERE user_id = ? AND status = "checked"', (user_id,))
+            deleted = cursor.rowcount
+            conn.commit()
+            conn.close()
+            return deleted
+    except Exception as e:
+        return 0
 
 def delete_unchecked_numbers(user_id):
     """শুধু আনচেক করা নম্বর ডিলিট করবে"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM numbers WHERE user_id = ? AND status = "unchecked"', (user_id,))
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    return deleted
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM numbers WHERE user_id = ? AND status = "unchecked"', (user_id,))
+            deleted = cursor.rowcount
+            conn.commit()
+            conn.close()
+            return deleted
+    except Exception as e:
+        return 0
 
 def get_stats(user_id):
     """বর্তমান স্ট্যাট পান"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked" AND has_id = 1', (user_id,))
-    with_id = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked" AND has_id = 0', (user_id,))
-    without_id = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked"', (user_id,))
-    total_checked = cursor.fetchone()[0]
-    
-    cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ?', (user_id,))
-    total = cursor.fetchone()[0]
-    
-    conn.close()
-    
-    return {
-        'with_id': with_id,
-        'without_id': without_id,
-        'total_checked': total_checked,
-        'total': total,
-        'remaining': total - total_checked
-    }
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked" AND has_id = 1', (user_id,))
+            with_id = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked" AND has_id = 0', (user_id,))
+            without_id = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ? AND status = "checked"', (user_id,))
+            total_checked = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM numbers WHERE user_id = ?', (user_id,))
+            total = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                'with_id': with_id,
+                'without_id': without_id,
+                'total_checked': total_checked,
+                'total': total,
+                'remaining': total - total_checked
+            }
+    except Exception as e:
+        return {'with_id': 0, 'without_id': 0, 'total_checked': 0, 'total': 0, 'remaining': 0}
 
 def get_user_thread_count(user_id):
     """ইউজারের থ্রেড কাউন্ট পান"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('SELECT thread_count FROM user_settings WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    
-    if result:
-        return result[0]
-    return 20
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('SELECT thread_count FROM user_settings WHERE user_id = ?', (user_id,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return result[0]
+            return 20
+    except Exception as e:
+        return 20
 
 def set_user_thread_count(user_id, thread_count):
     """ইউজারের থ্রেড কাউন্ট সেট করুন"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO user_settings (user_id, thread_count, updated_at)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-    ''', (user_id, thread_count))
-    conn.commit()
-    conn.close()
+    try:
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=10)
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO user_settings (user_id, thread_count, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            ''', (user_id, thread_count))
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        pass
 
 # ==================== USER AGENT FUNCTION ====================
 
@@ -304,9 +354,7 @@ def check_facebook_number(phone_number):
         
         return found_id
         
-    except requests.exceptions.Timeout:
-        return False
-    except Exception as e:
+    except:
         return False
 
 # ==================== LIVE DASHBOARD ====================
@@ -364,7 +412,7 @@ def send_welcome(message):
     
     bot.send_message(
         user_id,
-        "🎉 *Facebook Checker Bot v3.2*\n\n"
+        "🎉 *Facebook Checker Bot v3.3*\n\n"
         "আমি আপনার Facebook নম্বরগুলি চেক করতে পারি।\n"
         "প্রতিটি চেক এ নতুন User-Agent ব্যবহার করব।\n"
         "লাইভ ড্যাশবোর্ড সহ রিয়েল টাইম আপডেট!\n\n"
@@ -489,6 +537,7 @@ def handle_check_numbers(message):
         return
     
     is_checking[user_id] = True
+    should_stop[user_id] = False
     thread_count = get_user_thread_count(user_id)
     total = len(unchecked)
     
@@ -517,12 +566,29 @@ def handle_check_numbers(message):
     )
     dashboard_msg_id = dashboard_msg.message_id
     
+    # Stop/Start বাটন
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("⏸️ Stop Checking", callback_data=f"stop_check_{user_id}"),
+        telebot.types.InlineKeyboardButton("🔄 Resume", callback_data=f"resume_check_{user_id}")
+    )
+    
+    control_msg = bot.send_message(
+        user_id,
+        "চেকিং নিয়ন্ত্রণ:",
+        reply_markup=markup
+    )
+    
     checked_count = [0]
     lock = threading.Lock()
     
     def thread_worker():
         while True:
             try:
+                if should_stop.get(user_id):
+                    time.sleep(1)
+                    continue
+                
                 number_id, phone_number = checking_queue.get(timeout=1)
                 
                 has_id = 1 if check_facebook_number(phone_number) else 0
@@ -536,6 +602,8 @@ def handle_check_numbers(message):
                 
             except queue.Empty:
                 break
+            except Exception as e:
+                pass
     
     for number_id, phone_number in unchecked:
         checking_queue.put((number_id, phone_number))
@@ -550,6 +618,10 @@ def handle_check_numbers(message):
     last_update = time.time()
     
     while checked_count[0] < total:
+        if should_stop.get(user_id):
+            time.sleep(1)
+            continue
+        
         current_time = time.time()
         
         if current_time - last_update >= 3:
@@ -563,13 +635,14 @@ def handle_check_numbers(message):
                     parse_mode='Markdown'
                 )
                 last_update = current_time
-            except Exception as e:
+            except:
                 pass
         
         time.sleep(0.5)
     
     checking_queue.join()
     is_checking[user_id] = False
+    should_stop[user_id] = False
     
     final_stats = get_stats(user_id)
     final_dashboard = create_live_dashboard(user_id, final_stats)
@@ -580,6 +653,20 @@ def handle_check_numbers(message):
         f"```\n{final_dashboard}\n```",
         parse_mode='Markdown'
     )
+
+@bot.callback_query_handler(func=lambda call: "stop_check_" in call.data)
+def stop_checking(call):
+    """চেকিং থামাবে"""
+    user_id = int(call.data.split("_")[-1])
+    should_stop[user_id] = True
+    bot.answer_callback_query(call.id, "⏸️ চেকিং থেমে গেছে")
+
+@bot.callback_query_handler(func=lambda call: "resume_check_" in call.data)
+def resume_checking(call):
+    """চেকিং চালু করবে"""
+    user_id = int(call.data.split("_")[-1])
+    should_stop[user_id] = False
+    bot.answer_callback_query(call.id, "▶️ চেকিং শুরু হয়েছে")
 
 @bot.message_handler(func=lambda message: message.text == "📥 Download")
 def handle_download(message):
@@ -756,7 +843,7 @@ def process_replace_numbers(message):
     except Exception as e:
         bot.send_message(user_id, f"❌ ত্রুটি: {str(e)}")
 
-@bot.message_handler(func=lambda message: message.text == "���️ Delete All Numbers")
+@bot.message_handler(func=lambda message: message.text == "🗑️ Delete All Numbers")
 def delete_all_confirm(message):
     """সব নম্বর ডিলিট - কনফার্মেশন"""
     user_id = message.chat.id
@@ -876,7 +963,8 @@ def go_back(message):
 
 # Bot চালু করুন
 if __name__ == "__main__":
-    print("🤖 Facebook Checker Bot v3.2 চলছে...")
-    print("✨ ডাটা ম্যানেজমেন্ট সিস্টেম সহ!")
+    print("🤖 Facebook Checker Bot v3.3 চলছে...")
+    print("✨ ডাটা ম্যানেজমেন্ট + Stop/Resume সহ!")
     print("🔕 সব SSL Warnings suppressed!")
+    print("🛡️ Database Thread-Safe!")
     bot.infinity_polling()
