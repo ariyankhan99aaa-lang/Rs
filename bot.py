@@ -12,7 +12,7 @@ from urllib.parse import quote
 import re
 
 # Bot Configuration
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # আপনার টেলিগ্রাম বট টোকেন দিন
+BOT_TOKEN = "8651402670:AAFIOsiDYCJk0G6dAVEc7gz5lW9E7C04XH0"  # আপনার টেলিগ্রাম বট টোকেন দিন
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Database Setup
