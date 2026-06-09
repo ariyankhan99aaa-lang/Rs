@@ -10,9 +10,16 @@ import queue
 import random
 from urllib.parse import quote
 import re
+import urllib3
+import warnings
+
+# ==================== SUPPRESS WARNINGS ====================
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
 # Bot Configuration
-BOT_TOKEN = "8651402670:AAFIOsiDYCJk0G6dAVEc7gz5lW9E7C04XH0"  # আপনার টেলিগ্রাম বট টোকেন দিন
+BOT_TOKEN = "8651402670:AAFIOsiDYCJk0G6dAVEc7gz5lW9E7C04XH0"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Database Setup
@@ -24,7 +31,7 @@ Path(UPLOAD_FOLDER).mkdir(exist_ok=True)
 user_threads = {}
 checking_queue = queue.Queue()
 is_checking = {}
-live_stats = {}  # প্রতি ইউজারের লাইভ স্ট্যাট স্টোর করবে
+live_stats = {}
 
 # User Agent List
 USER_AGENTS = [
@@ -145,6 +152,47 @@ def get_checked_numbers(user_id, has_id=None):
     conn.close()
     return results
 
+def get_all_numbers(user_id):
+    """সব নম্বর fetch করবে"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        SELECT phone_number FROM numbers 
+        WHERE user_id = ?
+        ORDER BY id
+    ''', (user_id,))
+    results = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return results
+
+def delete_all_numbers(user_id):
+    """সব নম্বর ডিলিট করবে"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM numbers WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def delete_checked_numbers(user_id):
+    """শুধু চেক করা নম্বর ডিলিট করবে"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM numbers WHERE user_id = ? AND status = "checked"', (user_id,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+def delete_unchecked_numbers(user_id):
+    """শুধু আনচেক করা নম্বর ডিলিট করবে"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM numbers WHERE user_id = ? AND status = "unchecked"', (user_id,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
 def get_stats(user_id):
     """বর্তমান স্ট্যাট পান"""
     conn = sqlite3.connect(DB_PATH)
@@ -208,7 +256,6 @@ def check_facebook_number(phone_number):
     try:
         user_agent = get_random_user_agent()
         
-        # fb.com (limited server)
         url = "https://www.fb.com/login/identify"
         
         headers = {
@@ -233,7 +280,6 @@ def check_facebook_number(phone_number):
         
         response_text = response.text.lower()
         
-        # যদি নিচের কোনটা পাওয়া যায় তাহলে ID আছে
         has_id_indicators = [
             'identifier',
             'profile',
@@ -274,14 +320,12 @@ def create_live_dashboard(user_id, stats):
     total = stats['total']
     remaining = stats['remaining']
     
-    # Progress bar
     if total > 0:
         progress = (total_checked / total) * 100
     else:
         progress = 0
     
-    # Progress bar visual
-    filled = int(progress / 5)  # 20 chars = 100%
+    filled = int(progress / 5)
     empty = 20 - filled
     progress_bar = "█" * filled + "░" * empty
     
@@ -308,17 +352,19 @@ def send_welcome(message):
     """শুরু করার কমান্ড"""
     user_id = message.chat.id
     
-    markup = telebot.types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
     markup.add(
         telebot.types.KeyboardButton("📤 Upload"),
-        telebot.types.KeyboardButton("✅ Check Numbers"),
-        telebot.types.KeyboardButton("⚙️ Thread Setup"),
-        telebot.types.KeyboardButton("📥 Download")
+        telebot.types.KeyboardButton("✅ Check"),
+        telebot.types.KeyboardButton("📊 Statistics"),
+        telebot.types.KeyboardButton("⚙️ Settings"),
+        telebot.types.KeyboardButton("📥 Download"),
+        telebot.types.KeyboardButton("🗑️ Manage Data")
     )
     
     bot.send_message(
         user_id,
-        "🎉 *Facebook Checker Bot v3*\n\n"
+        "🎉 *Facebook Checker Bot v3.2*\n\n"
         "আমি আপনার Facebook নম্বরগুলি চেক করতে পারি।\n"
         "প্রতিটি চেক এ নতুন User-Agent ব্যবহার করব।\n"
         "লাইভ ড্যাশবোর্ড সহ রিয়েল টাইম আপডেট!\n\n"
@@ -360,10 +406,12 @@ def process_file_upload(message):
             
             count = save_numbers_to_db(user_id, numbers)
             
+            stats = get_stats(user_id)
             bot.send_message(
                 user_id,
                 f"✅ সফল!\n\n"
-                f"📊 {count} টি নম্বর আপলোড হয়েছে।",
+                f"📊 {count} টি নম্বর যোগ হয়েছে।\n"
+                f"📈 মোট নম্বর: {stats['total']}",
                 parse_mode='Markdown'
             )
         else:
@@ -372,7 +420,24 @@ def process_file_upload(message):
     except Exception as e:
         bot.send_message(user_id, f"❌ ত্রুটি: {str(e)}")
 
-@bot.message_handler(func=lambda message: message.text == "⚙️ Thread Setup")
+@bot.message_handler(func=lambda message: message.text == "📊 Statistics")
+def show_statistics(message):
+    """স্ট্যাটিস্টিক্স দেখাবে"""
+    user_id = message.chat.id
+    stats = get_stats(user_id)
+    
+    if stats['total'] == 0:
+        bot.send_message(user_id, "❌ এখনো কোনো নম্বর আপলোড করা হয়নি।")
+        return
+    
+    dashboard = create_live_dashboard(user_id, stats)
+    bot.send_message(
+        user_id,
+        f"```\n{dashboard}\n```",
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(func=lambda message: message.text == "⚙️ Settings")
 def handle_thread_setup(message):
     """থ্রেড সেটআপ"""
     user_id = message.chat.id
@@ -399,8 +464,7 @@ def process_thread_setup(message):
             bot.send_message(
                 user_id,
                 f"✅ থ্রেড সেটআপ সফল!\n"
-                f"নতুন থ্রেড সংখ্যা: *{thread_count}*\n\n"
-                f"🔄 প্রতিটি থ্রেডে নতুন User-Agent ব্যবহার হবে।",
+                f"নতুন থ্রেড সংখ্যা: *{thread_count}*",
                 parse_mode='Markdown'
             )
         else:
@@ -409,7 +473,7 @@ def process_thread_setup(message):
     except ValueError:
         bot.send_message(user_id, "❌ দয়া করে একটি সংখ্যা দিন।")
 
-@bot.message_handler(func=lambda message: message.text == "✅ Check Numbers")
+@bot.message_handler(func=lambda message: message.text == "✅ Check")
 def handle_check_numbers(message):
     """নম্বর চেক করা শুরু করবে"""
     user_id = message.chat.id
@@ -436,7 +500,6 @@ def handle_check_numbers(message):
         'unfresh': 0
     }
     
-    # শুরুর বার্তা পাঠান
     bot.send_message(
         user_id,
         f"🚀 চেকিং শুরু হয়েছে!\n\n"
@@ -447,7 +510,6 @@ def handle_check_numbers(message):
         parse_mode='Markdown'
     )
     
-    # লাইভ ড্যাশবোর্ড মেসেজ
     dashboard_msg = bot.send_message(
         user_id,
         "```\n" + create_live_dashboard(user_id, get_stats(user_id)) + "\n```",
@@ -475,18 +537,15 @@ def handle_check_numbers(message):
             except queue.Empty:
                 break
     
-    # Queue পূরণ করুন
     for number_id, phone_number in unchecked:
         checking_queue.put((number_id, phone_number))
     
-    # থ্রেড শুরু করুন
     threads = []
     for _ in range(thread_count):
         t = threading.Thread(target=thread_worker, daemon=True)
         t.start()
         threads.append(t)
     
-    # লাইভ আপডেট শুরু করুন (প্রতি 3 সেকেন্ডে)
     update_interval = 0.1
     last_update = time.time()
     
@@ -512,7 +571,6 @@ def handle_check_numbers(message):
     checking_queue.join()
     is_checking[user_id] = False
     
-    # চূড়ান্ত রিপোর্ট পাঠান
     final_stats = get_stats(user_id)
     final_dashboard = create_live_dashboard(user_id, final_stats)
     
@@ -532,6 +590,7 @@ def handle_download(message):
     markup.add(
         telebot.types.KeyboardButton("🟢 Fresh Numbers"),
         telebot.types.KeyboardButton("🔴 Unfresh Numbers"),
+        telebot.types.KeyboardButton("📋 All Numbers"),
         telebot.types.KeyboardButton("🔙 Back")
     )
     
@@ -595,6 +654,221 @@ def download_unfresh(message):
     Path(filename).unlink()
     send_welcome(message)
 
+@bot.message_handler(func=lambda message: message.text == "📋 All Numbers")
+def download_all(message):
+    """সব নম্বর ডাউনলোড করবে"""
+    user_id = message.chat.id
+    
+    numbers = get_all_numbers(user_id)
+    
+    if not numbers:
+        bot.send_message(user_id, "❌ কোনো নম্বর পাওয়া যায়নি।")
+        return
+    
+    filename = f"{UPLOAD_FOLDER}/all_{user_id}_{int(time.time())}.txt"
+    with open(filename, 'w') as f:
+        for number in numbers:
+            f.write(number + '\n')
+    
+    with open(filename, 'rb') as f:
+        bot.send_document(
+            user_id,
+            f,
+            caption=f"📋 সব Numbers\n\n"
+                   f"মোট: {len(numbers)} টি"
+        )
+    
+    Path(filename).unlink()
+    send_welcome(message)
+
+@bot.message_handler(func=lambda message: message.text == "🗑️ Manage Data")
+def handle_manage_data(message):
+    """ডাটা ম্যানেজমেন্ট অপশন"""
+    user_id = message.chat.id
+    
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    markup.add(
+        telebot.types.KeyboardButton("🔄 Replace All Numbers"),
+        telebot.types.KeyboardButton("🗑️ Delete All Numbers"),
+        telebot.types.KeyboardButton("❌ Delete Checked Only"),
+        telebot.types.KeyboardButton("⚠️ Delete Unchecked Only"),
+        telebot.types.KeyboardButton("🔙 Back")
+    )
+    
+    stats = get_stats(user_id)
+    
+    bot.send_message(
+        user_id,
+        f"🗑️ *ডাটা ম্যানেজমেন্ট*\n\n"
+        f"📊 বর্তমান স্ট্যাটাস:\n"
+        f"• মোট নম্বর: {stats['total']}\n"
+        f"• চেক করা: {stats['total_checked']}\n"
+        f"• চেক না করা: {stats['remaining']}\n\n"
+        f"নিচে থেকে একটি অপশন বেছে নিন:",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.message_handler(func=lambda message: message.text == "🔄 Replace All Numbers")
+def handle_replace_numbers(message):
+    """সব নম্বর রিপ্লেস করবে"""
+    user_id = message.chat.id
+    
+    bot.send_message(
+        user_id,
+        "📄 নতুন নম্বর ফাইল পাঠান।\n\n"
+        "⚠️ সব পুরোনো নম্বর ডিলিট হয়ে যাবে এবং নতুন নম্বর যুক্ত হবে।",
+        parse_mode='Markdown'
+    )
+    bot.register_next_step_handler(message, process_replace_numbers)
+
+def process_replace_numbers(message):
+    """সব নম্বর রিপ্লেস করবে"""
+    user_id = message.chat.id
+    
+    try:
+        if message.document:
+            delete_all_numbers(user_id)
+            
+            file_info = bot.get_file(message.document.file_id)
+            file_path = file_info.file_path
+            file_content = bot.download_file(file_path)
+            
+            local_file = f"{UPLOAD_FOLDER}/{user_id}_replaced_{message.document.file_name}"
+            with open(local_file, 'wb') as f:
+                f.write(file_content)
+            
+            with open(local_file, 'r', encoding='utf-8') as f:
+                numbers = f.readlines()
+            
+            count = save_numbers_to_db(user_id, numbers)
+            
+            bot.send_message(
+                user_id,
+                f"✅ সফল!\n\n"
+                f"🔄 সব নম্বর রিপ্লেস হয়েছে।\n"
+                f"📊 নতুন নম্বর: {count} টি",
+                parse_mode='Markdown'
+            )
+        else:
+            bot.send_message(user_id, "❌ দয়া করে একটি ফাইল পাঠান।")
+            
+    except Exception as e:
+        bot.send_message(user_id, f"❌ ত্রুটি: {str(e)}")
+
+@bot.message_handler(func=lambda message: message.text == "���️ Delete All Numbers")
+def delete_all_confirm(message):
+    """সব নম্বর ডিলিট - কনফার্মেশন"""
+    user_id = message.chat.id
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("✅ হ্যাঁ, ডিলিট করুন", callback_data="delete_all_yes"),
+        telebot.types.InlineKeyboardButton("❌ না, বাতিল করুন", callback_data="delete_all_no")
+    )
+    
+    bot.send_message(
+        user_id,
+        "⚠️ *সব নম্বর ডিলিট করবেন?*\n\n"
+        "এটি একটি স্থায়ী কার্যক্রম এবং পূর্ববর্তী করা যাবে না।",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_all_yes")
+def delete_all_execute(call):
+    """সব নম্বর ডিলিট করবে"""
+    user_id = call.message.chat.id
+    
+    delete_all_numbers(user_id)
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, "✅ সব নম্বর ডিলিট হয়েছে।")
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_all_no")
+def delete_all_cancel(call):
+    """ডিলিট বাতিল করবে"""
+    user_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, "❌ ডিলিট বাতিল করা হয়েছে।")
+
+@bot.message_handler(func=lambda message: message.text == "❌ Delete Checked Only")
+def delete_checked_confirm(message):
+    """চেক করা নম্বর ডিলিট - কনফার্মেশন"""
+    user_id = message.chat.id
+    stats = get_stats(user_id)
+    
+    if stats['total_checked'] == 0:
+        bot.send_message(user_id, "❌ চেক করা কোনো নম্বর নেই।")
+        return
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("✅ হ্যাঁ, ডিলিট করুন", callback_data="delete_checked_yes"),
+        telebot.types.InlineKeyboardButton("❌ না, বাতিল করুন", callback_data="delete_checked_no")
+    )
+    
+    bot.send_message(
+        user_id,
+        f"⚠️ *{stats['total_checked']} টি চেক করা নম্বর ডিলিট করবেন?*",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_checked_yes")
+def delete_checked_execute(call):
+    """চেক করা নম্বর ডিলিট করবে"""
+    user_id = call.message.chat.id
+    
+    deleted = delete_checked_numbers(user_id)
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, f"✅ {deleted} টি নম্বর ডিলিট হয়েছে।")
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_checked_no")
+def delete_checked_cancel(call):
+    """চেক করা নম্বর ডিলিট বাতিল"""
+    user_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, "❌ ডিলিট বাতিল করা হয়েছে।")
+
+@bot.message_handler(func=lambda message: message.text == "⚠️ Delete Unchecked Only")
+def delete_unchecked_confirm(message):
+    """চেক না করা নম্বর ডিলিট - কনফার্মেশন"""
+    user_id = message.chat.id
+    stats = get_stats(user_id)
+    
+    if stats['remaining'] == 0:
+        bot.send_message(user_id, "❌ চেক না করা কোনো নম্বর নেই।")
+        return
+    
+    markup = telebot.types.InlineKeyboardMarkup()
+    markup.add(
+        telebot.types.InlineKeyboardButton("✅ হ্যাঁ, ডিলিট করুন", callback_data="delete_unchecked_yes"),
+        telebot.types.InlineKeyboardButton("❌ না, বাতিল করুন", callback_data="delete_unchecked_no")
+    )
+    
+    bot.send_message(
+        user_id,
+        f"⚠️ *{stats['remaining']} টি চেক না করা নম্বর ডিলিট করবেন?*",
+        reply_markup=markup,
+        parse_mode='Markdown'
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_unchecked_yes")
+def delete_unchecked_execute(call):
+    """চেক না করা নম্বর ডিলিট করবে"""
+    user_id = call.message.chat.id
+    
+    deleted = delete_unchecked_numbers(user_id)
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, f"✅ {deleted} টি নম্বর ডিলিট হয়েছে।")
+
+@bot.callback_query_handler(func=lambda call: call.data == "delete_unchecked_no")
+def delete_unchecked_cancel(call):
+    """চেক না করা নম্বর ডিলিট বাতিল"""
+    user_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
+    bot.send_message(user_id, "❌ ডিলিট বাতিল করা হয়েছে।")
+
 @bot.message_handler(func=lambda message: message.text == "🔙 Back")
 def go_back(message):
     """মেইন মেনুতে ফিরে যান"""
@@ -602,7 +876,7 @@ def go_back(message):
 
 # Bot চালু করুন
 if __name__ == "__main__":
-    print("🤖 Facebook Checker Bot v3 চলছে...")
-    print("✨ লাইভ ড্যাশবোর্ড সহ!")
-    print("⚠️ BOT_TOKEN সেট করুন আগে!")
+    print("🤖 Facebook Checker Bot v3.2 চলছে...")
+    print("✨ ডাটা ম্যানেজমেন্ট সিস্টেম সহ!")
+    print("🔕 সব SSL Warnings suppressed!")
     bot.infinity_polling()
